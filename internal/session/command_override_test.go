@@ -186,7 +186,7 @@ func TestBuildCopilotCommand_WrongTool(t *testing.T) {
 	}
 }
 
-func TestBuildPiCommand_UsesInstanceScopedSessionDir(t *testing.T) {
+func TestBuildPiCommand_UsesPiStoreWithInstanceSessionID(t *testing.T) {
 	tmpDir := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpDir)
@@ -201,9 +201,10 @@ func TestBuildPiCommand_UsesInstanceScopedSessionDir(t *testing.T) {
 	wantSessionDir := "${HOME}/.pi/agent-deck/test-instance-id"
 	for _, want := range []string{
 		"session_dir=" + wantSessionDir,
-		"mkdir -p \"$session_dir\"",
+		`if ls "$session_dir"/*.jsonl >/dev/null 2>&1; then`,
 		"AGENTDECK_INSTANCE_ID=test-instance-id",
-		"pi --continue --session-dir \"$session_dir\"",
+		"pi --continue --session-dir \"$session_dir\"; else",
+		"pi --session-id test-instance-id; fi",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("buildPiCommand() = %q, want to contain %q", got, want)
@@ -386,22 +387,21 @@ func TestCreateForkedPiInstance_UsesNativeForkAndPersistsBaseCommand(t *testing.
 
 	for _, want := range []string{
 		"parent_session_dir=${HOME}/.pi/agent-deck/parent-pi-id",
-		"session_dir=${HOME}/.pi/agent-deck/" + forked.ID,
-		`source_file=$(find "$parent_session_dir" -type f -name '*.jsonl' -exec ls -t {} +`,
+		`source_file=$(ls -t "$parent_session_dir"/*.jsonl "${PI_CODING_AGENT_DIR:-${HOME}/.pi/agent}"/sessions/*/*_parent-pi-id.jsonl 2>/dev/null | head -n 1)`,
 		`AGENTDECK_INSTANCE_ID=` + forked.ID,
-		`pi --fork "$source_file" --session-dir "$session_dir"`,
+		`pi --fork "$source_file" --session-id ` + forked.ID,
 	} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("Pi fork command = %q, want to contain %q", cmd, want)
 		}
 	}
-	if strings.Contains(cmd, "--continue") {
-		t.Fatalf("Pi fork command must not include --continue: %s", cmd)
+	if strings.Contains(cmd, "--continue") || strings.Contains(cmd, "--session-dir") {
+		t.Fatalf("Pi fork command must target the Pi store by session id: %s", cmd)
 	}
 
 	resumeCmd := forked.buildPiCommand(forked.Command)
-	if !strings.Contains(resumeCmd, `pi --continue --session-dir "$session_dir"`) {
-		t.Fatalf("Pi forked instance restart command should resume with --continue, got: %s", resumeCmd)
+	if !strings.Contains(resumeCmd, ` pi --session-id `+forked.ID) {
+		t.Fatalf("Pi forked instance restart command should resume its store session by id, got: %s", resumeCmd)
 	}
 	if strings.Contains(resumeCmd, "--fork") {
 		t.Fatalf("Pi forked instance restart command must not replay --fork, got: %s", resumeCmd)

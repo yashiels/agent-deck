@@ -1,10 +1,6 @@
 package session
 
 import (
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
 	"sync"
 
 	"github.com/asheshgoplani/agent-deck/internal/recall"
@@ -150,8 +146,8 @@ func RecallEnabled() bool {
 
 // recallInstanceTranscript resolves the transcript file of a local
 // instance per harness: the Claude jsonl under the instance's config dir,
-// the Codex rollout, or the newest pi session file in the instance's
-// agent-deck directory. "" when nothing is on disk yet.
+// the Codex rollout, or the newest pi session file the instance owns.
+// "" when nothing is on disk yet.
 func recallInstanceTranscript(inst *Instance) string {
 	switch {
 	case IsClaudeCompatible(inst.Tool) && inst.ClaudeSessionID != "":
@@ -159,25 +155,15 @@ func recallInstanceTranscript(inst *Instance) string {
 	case IsCodexCompatible(inst.Tool):
 		return CodexRolloutPathForInstance(inst)
 	case inst.Tool == "pi":
-		dir, err := piInstanceSessionDir(inst.ID)
+		loc, err := piSafeInstanceSessionLocation(inst)
 		if err != nil {
 			return ""
 		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
+		files := loc.files()
+		if len(files) == 0 {
 			return ""
 		}
-		var names []string
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
-				names = append(names, e.Name())
-			}
-		}
-		if len(names) == 0 {
-			return ""
-		}
-		sort.Strings(names) // timestamp-prefixed: the last is the newest
-		return filepath.Join(dir, names[len(names)-1])
+		return files[len(files)-1]
 	}
 	return ""
 }

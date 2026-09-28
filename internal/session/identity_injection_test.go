@@ -263,7 +263,7 @@ func TestIdentityInjection_PerHarnessCommands(t *testing.T) {
 		inst := identityTestInstance("pi")
 		cmd := inst.buildPiCommand("pi")
 		file, _ := inst.IdentityFilePath()
-		if !strings.HasSuffix(cmd, "--append-system-prompt "+file) {
+		if strings.Count(cmd, "--append-system-prompt "+file) != 2 || !strings.HasSuffix(cmd, "--append-system-prompt "+file+"; fi") {
 			t.Errorf("pi command missing identity flag:\n%s", cmd)
 		}
 	})
