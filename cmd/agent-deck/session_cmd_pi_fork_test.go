@@ -64,8 +64,7 @@ func TestSessionFork_PiUsesNativeForkBeforeStart(t *testing.T) {
 	}
 	for _, want := range []string{
 		"parent_session_dir=${HOME}/.pi/agent-deck/" + parent.ID,
-		"session_dir=${HOME}/.pi/agent-deck/" + capturedFork.ID,
-		`pi --fork "$source_file" --session-dir "$session_dir"`,
+		`pi --fork "$source_file" --session-id ` + capturedFork.ID,
 	} {
 		if !strings.Contains(capturedFork.ForkStartCommand, want) {
 			t.Fatalf("Pi fork first-start command = %q, want to contain %q", capturedFork.ForkStartCommand, want)

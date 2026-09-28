@@ -345,7 +345,7 @@ type piSessionArtifact struct {
 }
 
 // resolveExactPiSessionArtifact resolves only a persisted Pi identity/path or
-// one uniquely validated JSONL in this instance's private Pi directory. Pi
+// one uniquely validated JSONL owned by this instance's Pi session location. Pi
 // v0.85+ generates timestamped filenames, so session.jsonl is legacy-only and
 // must never be treated as the current filename by default.
 func resolveExactPiSessionArtifact(inst *Instance) (piSessionArtifact, error) {
@@ -355,10 +355,11 @@ func resolveExactPiSessionArtifact(inst *Instance) (piSessionArtifact, error) {
 	if !validSwitchIdentity(inst.ID) {
 		return piSessionArtifact{}, fmt.Errorf("Pi instance has unsafe identity %q", inst.ID)
 	}
-	dir, err := piInstanceSessionDir(inst.ID)
+	loc, err := piSafeInstanceSessionLocation(inst)
 	if err != nil {
 		return piSessionArtifact{}, err
 	}
+	dir := loc.Dir
 	persistedID, persistedPath := strings.TrimSpace(inst.PiSessionID), strings.TrimSpace(inst.PiSessionPath)
 	if persistedID != "" || persistedPath != "" {
 		if persistedID == "" || persistedPath == "" {
@@ -367,7 +368,7 @@ func resolveExactPiSessionArtifact(inst *Instance) (piSessionArtifact, error) {
 		if err := validateExactSessionID(persistedID); err != nil {
 			return piSessionArtifact{}, fmt.Errorf("invalid persisted Pi session identity: %w", err)
 		}
-		if !piPathInInstanceDir(persistedPath, dir) {
+		if !loc.ownsPath(persistedPath) {
 			return piSessionArtifact{}, fmt.Errorf("persisted Pi session path is outside its instance directory")
 		}
 		id, err := readValidatedPiSessionHeader(persistedPath, inst.EffectiveWorkingDir(), false)
@@ -386,7 +387,7 @@ func resolveExactPiSessionArtifact(inst *Instance) (piSessionArtifact, error) {
 	}
 	var candidates []piSessionArtifact
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+		if entry.IsDir() || !loc.owns(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
@@ -413,25 +414,6 @@ func resolveExactPiSessionArtifact(inst *Instance) (piSessionArtifact, error) {
 		return piSessionArtifact{}, fmt.Errorf("ambiguous Pi context artifacts for instance %q (%d matches)", inst.ID, len(candidates))
 	}
 	return candidates[0], nil
-}
-
-func piInstanceSessionDir(instanceID string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
-		return "", fmt.Errorf("resolve Pi home: %w", err)
-	}
-	dir := filepath.Join(home, ".pi", "agent-deck", instanceID)
-	if err := ensureNoSymlinkPath(dir); err != nil {
-		return "", fmt.Errorf("unsafe Pi instance session directory: %w", err)
-	}
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return "", err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return "", fmt.Errorf("Pi instance session directory is not a real directory")
-	}
-	return dir, nil
 }
 
 func piPathInInstanceDir(path, dir string) bool {

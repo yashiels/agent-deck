@@ -2617,19 +2617,28 @@ func (i *Instance) buildCodexCommandWithPrompt(baseCommand, prompt string) (stri
 	return command + " " + shellescape.Quote(prompt), true
 }
 
-// piAgentDeckSessionDirExpr returns a target-shell expression for the Pi session
-// directory Agent Deck owns for an instance. It intentionally uses target-side
-// $HOME rather than resolving the Agent Deck process' home directory, keeping
-// local, SSH, and sandbox launch paths consistent.
+// piAgentDeckSessionDirExpr returns a target-shell expression for the
+// instance-scoped Pi session directory used by sessions created before Pi
+// sessions moved into Pi's own store, and by cross-harness switch targets. It
+// intentionally uses target-side $HOME rather than resolving the Agent Deck
+// process' home directory, keeping local, SSH, and sandbox launch paths
+// consistent.
 func piAgentDeckSessionDirExpr(instanceID string) string {
 	return "${HOME}/.pi/agent-deck/" + shellescape.Quote(instanceID)
 }
 
+// piStoreSessionGlobExpr matches the JSONL Pi writes for --session-id <id> in
+// any project directory of Pi's default session store.
+func piStoreSessionGlobExpr(instanceID string) string {
+	return "\"${PI_CODING_AGENT_DIR:-${HOME}/.pi/agent}\"/sessions/*/*_" + shellescape.Quote(instanceID) + ".jsonl"
+}
+
 // buildPiCommand builds the command for the Pi CLI.
-// Pi sessions are JSONL files, not externally named sessions like Claude/Codex.
-// Scope Pi's session directory to the Agent Deck instance and always launch
-// with --continue so restarts resume that instance without colliding with other
-// Agent Deck Pi sessions in the same project.
+// Sessions live in Pi's default store under --session-id <instance id>, so
+// Pi's own /resume lists them next to every other Pi session and restarts
+// reopen the instance's conversation without colliding with other Agent Deck
+// Pi sessions in the same project. Instances that already have a JSONL in the
+// legacy instance-scoped directory keep resuming from it.
 func (i *Instance) buildPiCommand(baseCommand string) string {
 	if i.Tool != "pi" {
 		return baseCommand
@@ -2645,12 +2654,15 @@ func (i *Instance) buildPiCommand(baseCommand string) string {
 	quotedInstanceID := shellescape.Quote(i.ID)
 	quotedProfile := shellescape.Quote(sessionProfileEnvValue())
 
+	launchEnv := fmt.Sprintf("AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s", quotedInstanceID, quotedProfile, cmd)
+
 	return envPrefix + fmt.Sprintf(
-		"session_dir=%s; mkdir -p \"$session_dir\" && AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --continue --session-dir \"$session_dir\"%s",
+		"session_dir=%s; if ls \"$session_dir\"/*.jsonl >/dev/null 2>&1; then %s --continue --session-dir \"$session_dir\"%s; else %s --session-id %s%s; fi",
 		sessionDir,
+		launchEnv,
+		i.piIdentityFlag(),
+		launchEnv,
 		quotedInstanceID,
-		quotedProfile,
-		cmd,
 		i.piIdentityFlag(),
 	)
 }
@@ -2670,17 +2682,17 @@ func (i *Instance) buildPiForkCommandForTarget(target *Instance, baseCommand str
 	}
 
 	parentSessionDir := piAgentDeckSessionDirExpr(i.ID)
-	sessionDir := piAgentDeckSessionDirExpr(target.ID)
 	quotedInstanceID := shellescape.Quote(target.ID)
 	quotedProfile := shellescape.Quote(sessionProfileEnvValue())
 
 	return envPrefix + fmt.Sprintf(
-		"parent_session_dir=%s; session_dir=%s; mkdir -p \"$session_dir\" && source_file=$(find \"$parent_session_dir\" -type f -name '*.jsonl' -exec ls -t {} + 2>/dev/null | head -n 1); if [ -z \"$source_file\" ]; then echo \"No Pi session file found in $parent_session_dir\" >&2; exit 1; fi; AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --fork \"$source_file\" --session-dir \"$session_dir\"%s",
+		"parent_session_dir=%s; source_file=$(ls -t \"$parent_session_dir\"/*.jsonl %s 2>/dev/null | head -n 1); if [ -z \"$source_file\" ]; then echo \"No Pi session file found in $parent_session_dir or the Pi session store\" >&2; exit 1; fi; AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --fork \"$source_file\" --session-id %s%s",
 		parentSessionDir,
-		sessionDir,
+		piStoreSessionGlobExpr(i.ID),
 		quotedInstanceID,
 		quotedProfile,
 		cmd,
+		quotedInstanceID,
 		target.piIdentityFlag(),
 	), nil
 }
@@ -9269,24 +9281,16 @@ func (i *Instance) getPiLastResponse() (*ResponseOutput, error) {
 	if i.IsSSH() || i.IsSandboxed() {
 		return nil, fmt.Errorf("instance %s runs outside this host; its Pi transcript is not on this machine", i.ID)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-	dir := filepath.Join(home, ".pi", "agent-deck", i.ID)
-	entries, err := os.ReadDir(dir)
+	loc, err := piInstanceSessionLocation(i)
 	if err != nil {
 		return nil, err
 	}
 	var latest string
 	var latestTime time.Time
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".jsonl") {
-			continue
-		}
-		info, err := entry.Info()
+	for _, path := range loc.files() {
+		info, err := os.Stat(path)
 		if err == nil && (latest == "" || info.ModTime().After(latestTime)) {
-			latest = filepath.Join(dir, entry.Name())
+			latest = path
 			latestTime = info.ModTime()
 		}
 	}
@@ -10874,23 +10878,8 @@ func (i *Instance) CanForkPi() bool {
 }
 
 func (i *Instance) hasLocalPiSessionFile() bool {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return false
-	}
-	sessionDir := filepath.Join(home, ".pi", "agent-deck", i.ID)
-	found := false
-	_ = filepath.WalkDir(sessionDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d == nil || d.IsDir() {
-			return nil
-		}
-		if strings.EqualFold(filepath.Ext(path), ".jsonl") {
-			found = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	return found
+	loc, err := piInstanceSessionLocation(i)
+	return err == nil && len(loc.files()) > 0
 }
 
 // Fork returns the command to create a forked Claude session

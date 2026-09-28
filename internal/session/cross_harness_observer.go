@@ -332,20 +332,21 @@ func snapshotPiSessionDirectory(target *Instance) map[string]string {
 	if target == nil || target.Tool != "pi" {
 		return nil
 	}
-	dir, err := piInstanceSessionDir(target.ID)
+	loc, err := piSafeInstanceSessionLocation(target)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]string{}
 		}
 		return nil
 	}
+	dir := loc.Dir
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
 	snapshot := make(map[string]string)
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+		if entry.IsDir() || !loc.owns(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
@@ -369,17 +370,18 @@ func readPiArtifactCreatedAfterSnapshot(target *Instance, expected FreshTargetId
 	if expected.NativeSessionPath != "" {
 		return CrossHarnessNativeArtifact{}, fmt.Errorf("Pi launch has a legacy fixed path, not a generated-file snapshot contract")
 	}
-	dir, err := piInstanceSessionDir(target.ID)
+	loc, err := piSafeInstanceSessionLocation(target)
 	if err != nil {
 		return CrossHarnessNativeArtifact{}, err
 	}
+	dir := loc.Dir
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return CrossHarnessNativeArtifact{}, err
 	}
 	var candidates []CrossHarnessNativeArtifact
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+		if entry.IsDir() || !loc.owns(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
@@ -416,8 +418,8 @@ func readCrossHarnessNativeArtifact(target *Instance, expected FreshTargetIdenti
 		if expected.NativeSessionPath != "" {
 			// Compatibility for persisted legacy plans only. New Pi plans leave
 			// this empty because Pi, not Agent Deck, names the timestamped file.
-			dir, dirErr := piInstanceSessionDir(target.ID)
-			if dirErr != nil || !piPathInInstanceDir(expected.NativeSessionPath, dir) {
+			loc, locErr := piSafeInstanceSessionLocation(target)
+			if locErr != nil || !loc.ownsPath(expected.NativeSessionPath) {
 				return CrossHarnessNativeArtifact{}, fmt.Errorf("Pi target session artifact is unavailable")
 			}
 			id, headerErr := readValidatedPiSessionHeader(expected.NativeSessionPath, target.EffectiveWorkingDir(), filepath.Base(expected.NativeSessionPath) == "session.jsonl")
