@@ -96,10 +96,7 @@ func TestExitToShell_PiDisabledLeavesCommandUnchanged(t *testing.T) {
 	}
 }
 
-// A pi fork's first start runs `find ... -exec ls -t {} +` to pick the parent
-// session file. The launcher strip must only remove an `exec ` in command
-// position, never the `exec ` inside `-exec`, or the fork finds no file.
-func TestExitToShell_PiForkKeepsFindExec(t *testing.T) {
+func TestExitToShell_PiForkResolvesParentSession(t *testing.T) {
 	exitToShellTestEnv(t)
 
 	dir := t.TempDir()
@@ -120,10 +117,6 @@ func TestExitToShell_PiForkKeepsFindExec(t *testing.T) {
 	}
 	forked.ExitToShell = boolPtr(true)
 	wrapped := forked.wrapExitToShell(cmd)
-	if !strings.Contains(wrapped, "-exec ls -t {} +") {
-		t.Fatalf("wrap must keep find's -exec intact, got:\n%s", wrapped)
-	}
-
 	out := runPaneCommand(t, wrapped, dir, exitToShellFakeEnv(t, "pi"))
 	if !strings.Contains(out, "AGENT_RAN --fork "+sessionFile) {
 		t.Fatalf("fork did not resolve the parent session file, output:\n%s", out)
