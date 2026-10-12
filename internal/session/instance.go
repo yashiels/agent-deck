@@ -346,8 +346,9 @@ type Instance struct {
 	PiSessionPath string `json:"pi_session_path,omitempty"`
 
 	// Hermes CLI integration. Hermes mints a new session ID each launch and does
-	// not export it (no env var / hook), so agent-deck captures it from
-	// `hermes sessions list` at restart time and resumes with --resume. Not
+	// not export it as an env var, so at restart time agent-deck reads it from
+	// the instance's hook anchor (.sid), falling back to `hermes sessions list`,
+	// and resumes with --resume. Not
 	// persisted (json:"-"): it is re-captured on every restart, so it needs no
 	// lifetime beyond a single Restart() call — which also keeps it out of the
 	// JSON marshaling that could otherwise race the restart-time write.
@@ -8293,9 +8294,10 @@ func (i *Instance) clearSessionBindingForFreshStart() {
 	}
 
 	if i.Tool == "hermes" {
-		// Drop the captured resume ID so the next launch starts a new session
-		// and Restart() re-captures rather than resuming the old conversation.
+		// Drop the resume ID and the hook anchor so the next launch starts a
+		// new session and a later Restart() cannot resume the discarded one.
 		i.HermesSessionID = ""
+		ClearHookSessionAnchor(i.ID)
 	}
 
 	if i.Tool == "deepseek" {
@@ -10294,7 +10296,9 @@ func (i *Instance) restart(env map[string]string) (err error) {
 	// Generation publication is the restart invalidation boundary. Commit it
 	// before any signal/kill reaches the old Hermes process, so its delayed
 	// hooks cannot overwrite the replacement's starting seed.
+	var hermesAnchorSessionID string
 	if i.Tool == "hermes" {
+		hermesAnchorSessionID = ReadHookSessionAnchor(i.ID)
 		if _, err := i.seedHermesHookGeneration("starting", false); err != nil {
 			return fmt.Errorf("seed hermes restart generation: %w", err)
 		}
@@ -10707,13 +10711,17 @@ func (i *Instance) restart(env map[string]string) (err error) {
 	} else if IsCodexCompatible(i.Tool) && i.CodexSessionID != "" {
 		command = i.buildCodexCommand(i.Command)
 	} else if i.Tool == "hermes" {
-		// Re-capture the pane's hermes session ID on EVERY restart (hermes
-		// doesn't export it). Overwriting rather than caching once self-heals a
-		// stale ID: if the previously-resumed session was pruned, the query
-		// returns the current most-recent session, or "" — in which case
-		// buildHermesCommand starts fresh instead of resuming a dead ID forever.
-		// Scoped to the working dir to avoid picking up an unrelated session.
-		i.HermesSessionID = captureHermesSessionID(i.EffectiveWorkingDir())
+		// Resume the pane's OWN hermes session: the hook anchor (.sid) that
+		// the hook handler wrote for this instance, read before the old pane
+		// was killed. Only when no anchor exists fall back to the newest CLI
+		// session in the working dir, or "" — in which case buildHermesCommand
+		// starts fresh. The newest-in-folder lookup alone made every entry
+		// sharing a folder resume the same session, which hermes refuses
+		// while another pane holds it.
+		i.HermesSessionID = hermesAnchorSessionID
+		if i.HermesSessionID == "" {
+			i.HermesSessionID = captureHermesSessionID(i.EffectiveWorkingDir())
+		}
 		// Drop any stale hook state from the previous process, then seed a
 		// synthetic "waiting" baseline. Hermes fires on_session_start only at
 		// the FIRST TURN of a brand-new session (not at process launch), so
